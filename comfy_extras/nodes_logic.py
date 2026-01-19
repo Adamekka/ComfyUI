@@ -186,7 +186,7 @@ class AutogrowNamesTestNode(io.ComfyNode):
 class AutogrowPrefixTestNode(io.ComfyNode):
     @classmethod
     def define_schema(cls):
-        template = _io.Autogrow.TemplatePrefix(input=io.Float.Input("float", optional=True), prefix="float", min=1, max=10)
+        template = _io.Autogrow.TemplatePrefix(input=io.Float.Input("float"), prefix="float", min=1, max=10)
         return io.Schema(
             node_id="AutogrowPrefixTestNode",
             display_name="AutogrowPrefixTest",
@@ -257,9 +257,9 @@ class LogicExtension(ComfyExtension):
             CustomComboNode,
             # SoftSwitchNode,
             # ConvertStringToComboNode,
-            DCTestNode,
+            # DCTestNode,
             # AutogrowNamesTestNode,
-            AutogrowPrefixTestNode,
+            # AutogrowPrefixTestNode,
             # ComboOutputTestNode,
             # InvertBooleanNode,
         ]
