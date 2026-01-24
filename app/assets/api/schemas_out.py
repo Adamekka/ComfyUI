@@ -91,3 +91,12 @@ class TagsRemove(BaseModel):
     removed: list[str] = Field(default_factory=list)
     not_present: list[str] = Field(default_factory=list)
     total_tags: list[str] = Field(default_factory=list)
+
+
+class TagHistogramEntry(BaseModel):
+    name: str
+    count: int
+
+
+class TagHistogramResponse(BaseModel):
+    tags: list[TagHistogramEntry] = Field(default_factory=list)

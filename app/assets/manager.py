@@ -71,6 +71,7 @@ def list_assets(
     sort: str = "created_at",
     order: str = "desc",
     owner_id: str = "",
+    include_public: bool = True,
 ) -> schemas_out.AssetsList:
     sort = _safe_sort_field(sort)
     order = "desc" if (order or "desc").lower() not in {"asc", "desc"} else order.lower()
@@ -289,7 +290,8 @@ def update_asset(
     *,
     asset_info_id: str,
     name: str | None = None,
-    tags: list[str] | None = None,
+    mime_type: str | None = None,
+    preview_id: str | None = None,
     user_metadata: dict | None = None,
     owner_id: str = "",
 ) -> schemas_out.AssetUpdated:
@@ -304,11 +306,17 @@ def update_asset(
             session,
             asset_info_id=asset_info_id,
             name=name,
-            tags=tags,
+            mime_type=mime_type,
             user_metadata=user_metadata,
-            tag_origin="manual",
             asset_info_row=info_row,
         )
+
+        if preview_id is not None:
+            set_asset_info_preview(
+                session,
+                asset_info_id=asset_info_id,
+                preview_asset_id=preview_id if preview_id else None,
+            )
 
         tag_names = get_asset_tags(session, asset_info_id=asset_info_id)
         session.commit()
@@ -490,6 +498,7 @@ def list_tags(
     order: str = "count_desc",
     include_zero: bool = True,
     owner_id: str = "",
+    include_public: bool = True,
 ) -> schemas_out.TagsList:
     limit = max(1, min(1000, limit))
     offset = max(0, offset)
@@ -507,3 +516,17 @@ def list_tags(
 
     tags = [schemas_out.TagUsage(name=name, count=count, type=tag_type) for (name, tag_type, count) in rows]
     return schemas_out.TagsList(tags=tags, total=total, has_more=(offset + len(tags)) < total)
+
+
+def get_tag_histogram(
+    *,
+    include_tags: Sequence[str] | None = None,
+    exclude_tags: Sequence[str] | None = None,
+    name_contains: str | None = None,
+    metadata_filter: dict | None = None,
+    limit: int = 100,
+    include_public: bool = True,
+    owner_id: str = "",
+) -> schemas_out.TagHistogramResponse:
+    # TODO: Implement actual histogram query in queries.py
+    return schemas_out.TagHistogramResponse(tags=[])

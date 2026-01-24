@@ -683,9 +683,8 @@ def update_asset_info_full(
     *,
     asset_info_id: str,
     name: str | None = None,
-    tags: Sequence[str] | None = None,
+    mime_type: str | None = None,
     user_metadata: dict | None = None,
-    tag_origin: str = "manual",
     asset_info_row: Any = None,
 ) -> AssetInfo:
     if not asset_info_row:
@@ -699,6 +698,11 @@ def update_asset_info_full(
     if name is not None and name != info.name:
         info.name = name
         touched = True
+
+    if mime_type is not None and info.asset:
+        if info.asset.mime_type != mime_type:
+            info.asset.mime_type = mime_type
+            touched = True
 
     computed_filename = None
     try:
@@ -726,15 +730,6 @@ def update_asset_info_full(
                     session, asset_info_id=asset_info_id, user_metadata=new_meta
                 )
                 touched = True
-
-    if tags is not None:
-        set_asset_info_tags(
-            session,
-            asset_info_id=asset_info_id,
-            tags=tags,
-            origin=tag_origin,
-        )
-        touched = True
 
     if touched and user_metadata is None:
         info.updated_at = utcnow()

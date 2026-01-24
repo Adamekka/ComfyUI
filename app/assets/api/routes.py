@@ -67,8 +67,27 @@ async def list_assets(request: web.Request) -> web.Response:
         sort=q.sort,
         order=q.order,
         owner_id=USER_MANAGER.get_request_user_id(request),
+        include_public=q.include_public,
     )
     return web.json_response(payload.model_dump(mode="json"))
+
+
+@ROUTES.get("/api/assets/remote-metadata")
+async def get_remote_asset_metadata(request: web.Request) -> web.Response:
+    """
+    Fetch metadata from remote URLs (CivitAI, HuggingFace) without downloading.
+    Status: Not implemented yet.
+    """
+    return _error_response(501, "NOT_IMPLEMENTED", "Remote metadata fetching is not yet supported.")
+
+
+@ROUTES.post("/api/assets/download")
+async def create_asset_download(request: web.Request) -> web.Response:
+    """
+    Initiate background download job for large files from HuggingFace or CivitAI.
+    Status: Not implemented yet.
+    """
+    return _error_response(501, "NOT_IMPLEMENTED", "Background asset download is not yet supported.")
 
 
 @ROUTES.get(f"/api/assets/{{id:{UUID_RE}}}")
@@ -146,10 +165,22 @@ async def create_asset_from_hash(request: web.Request) -> web.Response:
 
 @ROUTES.post("/api/assets")
 async def upload_asset(request: web.Request) -> web.Response:
-    """Multipart/form-data endpoint for Asset uploads."""
+    """Asset upload endpoint supporting multipart/form-data (file upload) or application/json (URL-based)."""
 
-    if not (request.content_type or "").lower().startswith("multipart/"):
-        return _error_response(415, "UNSUPPORTED_MEDIA_TYPE", "Use multipart/form-data for uploads.")
+    content_type = (request.content_type or "").lower()
+
+    if content_type.startswith("application/json"):
+        try:
+            payload = await request.json()
+            schemas_in.UploadAssetFromUrlBody.model_validate(payload)
+        except ValidationError as ve:
+            return _validation_error_response("INVALID_BODY", ve)
+        except Exception:
+            return _error_response(400, "INVALID_JSON", "Request body must be valid JSON.")
+        return _error_response(501, "NOT_IMPLEMENTED", "URL-based asset upload is not yet supported. Use multipart/form-data file upload.")
+
+    if not content_type.startswith("multipart/"):
+        return _error_response(415, "UNSUPPORTED_MEDIA_TYPE", "Use multipart/form-data for uploads or application/json for URL-based uploads.")
 
     reader = await request.multipart()
 
@@ -340,7 +371,8 @@ async def update_asset(request: web.Request) -> web.Response:
         result = manager.update_asset(
             asset_info_id=asset_info_id,
             name=body.name,
-            tags=body.tags,
+            mime_type=body.mime_type,
+            preview_id=body.preview_id,
             user_metadata=body.user_metadata,
             owner_id=USER_MANAGER.get_request_user_id(request),
         )
@@ -349,34 +381,6 @@ async def update_asset(request: web.Request) -> web.Response:
     except Exception:
         logging.exception(
             "update_asset failed for asset_info_id=%s, owner_id=%s",
-            asset_info_id,
-            USER_MANAGER.get_request_user_id(request),
-        )
-        return _error_response(500, "INTERNAL", "Unexpected server error.")
-    return web.json_response(result.model_dump(mode="json"), status=200)
-
-
-@ROUTES.put(f"/api/assets/{{id:{UUID_RE}}}/preview")
-async def set_asset_preview(request: web.Request) -> web.Response:
-    asset_info_id = str(uuid.UUID(request.match_info["id"]))
-    try:
-        body = schemas_in.SetPreviewBody.model_validate(await request.json())
-    except ValidationError as ve:
-        return _validation_error_response("INVALID_BODY", ve)
-    except Exception:
-        return _error_response(400, "INVALID_JSON", "Request body must be valid JSON.")
-
-    try:
-        result = manager.set_asset_preview(
-            asset_info_id=asset_info_id,
-            preview_asset_id=body.preview_id,
-            owner_id=USER_MANAGER.get_request_user_id(request),
-        )
-    except (PermissionError, ValueError) as ve:
-        return _error_response(404, "ASSET_NOT_FOUND", str(ve), {"id": asset_info_id})
-    except Exception:
-        logging.exception(
-            "set_asset_preview failed for asset_info_id=%s, owner_id=%s",
             asset_info_id,
             USER_MANAGER.get_request_user_id(request),
         )
@@ -431,6 +435,7 @@ async def get_tags(request: web.Request) -> web.Response:
         order=query.order,
         include_zero=query.include_zero,
         owner_id=USER_MANAGER.get_request_user_id(request),
+        include_public=query.include_public,
     )
     return web.json_response(result.model_dump(mode="json"))
 
@@ -493,6 +498,29 @@ async def delete_asset_tags(request: web.Request) -> web.Response:
         return _error_response(500, "INTERNAL", "Unexpected server error.")
 
     return web.json_response(result.model_dump(mode="json"), status=200)
+
+
+@ROUTES.get("/api/assets/tags/refine")
+async def get_asset_tag_histogram(request: web.Request) -> web.Response:
+    """
+    GET request to get a tag histogram for filtered assets.
+    """
+    query_dict = get_query_dict(request)
+    try:
+        q = schemas_in.TagsRefineQuery.model_validate(query_dict)
+    except ValidationError as ve:
+        return _validation_error_response("INVALID_QUERY", ve)
+
+    payload = manager.get_tag_histogram(
+        include_tags=q.include_tags,
+        exclude_tags=q.exclude_tags,
+        name_contains=q.name_contains,
+        metadata_filter=q.metadata_filter,
+        limit=q.limit,
+        include_public=q.include_public,
+        owner_id=USER_MANAGER.get_request_user_id(request),
+    )
+    return web.json_response(payload.model_dump(mode="json"))
 
 
 @ROUTES.post("/api/assets/scan/seed")

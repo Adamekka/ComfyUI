@@ -27,6 +27,8 @@ class ListAssetsQuery(BaseModel):
     sort: Literal["name", "created_at", "updated_at", "size", "last_access_time"] = "created_at"
     order: Literal["asc", "desc"] = "desc"
 
+    include_public: bool = True
+
     @field_validator("include_tags", "exclude_tags", mode="before")
     @classmethod
     def _split_csv_tags(cls, v):
@@ -61,16 +63,28 @@ class ListAssetsQuery(BaseModel):
 
 class UpdateAssetBody(BaseModel):
     name: str | None = None
-    tags: list[str] | None = None
+    mime_type: str | None = None
+    preview_id: str | None = None
     user_metadata: dict[str, Any] | None = None
+
+    @field_validator("preview_id", mode="before")
+    @classmethod
+    def _norm_uuid(cls, v):
+        if v is None:
+            return None
+        s = str(v).strip()
+        if not s:
+            return None
+        try:
+            uuid.UUID(s)
+        except Exception:
+            raise ValueError("preview_id must be a UUID")
+        return s
 
     @model_validator(mode="after")
     def _at_least_one(self):
-        if self.name is None and self.tags is None and self.user_metadata is None:
-            raise ValueError("Provide at least one of: name, tags, user_metadata.")
-        if self.tags is not None:
-            if not isinstance(self.tags, list) or not all(isinstance(t, str) for t in self.tags):
-                raise ValueError("Field 'tags' must be an array of strings.")
+        if self.name is None and self.mime_type is None and self.preview_id is None and self.user_metadata is None:
+            raise ValueError("Provide at least one of: name, mime_type, preview_id, user_metadata.")
         return self
 
 
@@ -122,6 +136,7 @@ class TagsListQuery(BaseModel):
     offset: int = Field(0, ge=0, le=10_000_000)
     order: Literal["count_desc", "name_asc"] = "count_desc"
     include_zero: bool = True
+    include_public: bool = True
 
     @field_validator("prefix")
     @classmethod
@@ -271,9 +286,48 @@ class UploadAssetSpec(BaseModel):
         return self
 
 
-class SetPreviewBody(BaseModel):
-    """Set or clear the preview for an AssetInfo. Provide an Asset.id or null."""
+class UploadAssetFromUrlBody(BaseModel):
+    """JSON body for URL-based asset upload."""
+    model_config = ConfigDict(extra="ignore", str_strip_whitespace=True)
+
+    url: str = Field(..., description="HTTP/HTTPS URL to download the asset from")
+    name: str = Field(..., max_length=512, description="Display name for the asset")
+    tags: list[str] = Field(default_factory=list)
+    user_metadata: dict[str, Any] = Field(default_factory=dict)
     preview_id: str | None = None
+
+    @field_validator("url")
+    @classmethod
+    def _validate_url(cls, v):
+        s = (v or "").strip()
+        if not s:
+            raise ValueError("url must not be empty")
+        if not (s.startswith("http://") or s.startswith("https://")):
+            raise ValueError("url must start with http:// or https://")
+        return s
+
+    @field_validator("tags", mode="before")
+    @classmethod
+    def _parse_tags(cls, v):
+        if v is None:
+            return []
+        if isinstance(v, list):
+            out = [str(t).strip().lower() for t in v if str(t).strip()]
+            seen = set()
+            dedup = []
+            for t in out:
+                if t not in seen:
+                    seen.add(t)
+                    dedup.append(t)
+            return dedup
+        return []
+
+    @field_validator("user_metadata", mode="before")
+    @classmethod
+    def _parse_metadata(cls, v):
+        if v is None or isinstance(v, dict):
+            return v or {}
+        return {}
 
     @field_validator("preview_id", mode="before")
     @classmethod
@@ -292,3 +346,45 @@ class SetPreviewBody(BaseModel):
 
 class ScheduleAssetScanBody(BaseModel):
     roots: list[RootType] = Field(..., min_length=1)
+
+
+class TagsRefineQuery(BaseModel):
+    """Query parameters for tag histogram/refinement endpoint."""
+    model_config = ConfigDict(extra="ignore", str_strip_whitespace=True)
+
+    include_tags: list[str] = Field(default_factory=list)
+    exclude_tags: list[str] = Field(default_factory=list)
+    name_contains: str | None = None
+    metadata_filter: dict[str, Any] | None = None
+    limit: conint(ge=1, le=1000) = 100
+    include_public: bool = True
+
+    @field_validator("include_tags", "exclude_tags", mode="before")
+    @classmethod
+    def _split_csv_tags(cls, v):
+        if v is None:
+            return []
+        if isinstance(v, str):
+            return [t.strip() for t in v.split(",") if t.strip()]
+        if isinstance(v, list):
+            out: list[str] = []
+            for item in v:
+                if isinstance(item, str):
+                    out.extend([t.strip() for t in item.split(",") if t.strip()])
+            return out
+        return v
+
+    @field_validator("metadata_filter", mode="before")
+    @classmethod
+    def _parse_metadata_json(cls, v):
+        if v is None or isinstance(v, dict):
+            return v
+        if isinstance(v, str) and v.strip():
+            try:
+                parsed = json.loads(v)
+            except Exception as e:
+                raise ValueError(f"metadata_filter must be JSON: {e}") from e
+            if not isinstance(parsed, dict):
+                raise ValueError("metadata_filter must be a JSON object")
+            return parsed
+        return None
