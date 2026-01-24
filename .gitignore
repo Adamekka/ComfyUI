@@ -21,6 +21,7 @@ venv/
 *.log
 web_custom_versions/
 .DS_Store
+*:Zone.Identifier
 openapi.yaml
 filtered-openapi.yaml
 uv.lock
