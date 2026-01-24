@@ -24,11 +24,12 @@ Example usage:
 from abc import ABC, abstractmethod
 from typing import Any, Optional, Tuple, List
 from dataclasses import dataclass
-import logging
-import threading
 import hashlib
-import pickle
+import json
+import logging
 import math
+import pickle
+import threading
 
 logger = logging.getLogger(__name__)
 
@@ -210,8 +211,6 @@ def _canonicalize(obj: Any) -> Any:
     which is critical for cross-pod cache key consistency. Frozensets in particular
     have non-deterministic iteration order between Python sessions.
     """
-    import json
-
     if isinstance(obj, frozenset):
         # Sort frozenset items for deterministic ordering
         return ("__frozenset__", sorted(
@@ -252,8 +251,6 @@ def serialize_cache_key(cache_key: Any) -> bytes:
     affecting frozenset iteration order. This is critical for distributed caching
     where different pods need to compute the same hash for identical inputs.
     """
-    import json
-
     try:
         canonical = _canonicalize(cache_key)
         json_str = json.dumps(canonical, sort_keys=True, separators=(',', ':'))
