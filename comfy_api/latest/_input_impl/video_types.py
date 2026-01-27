@@ -6,6 +6,7 @@ from typing import Optional
 from .._input import AudioInput, VideoInput
 import av
 import io
+import itertools
 import json
 import numpy as np
 import math
@@ -28,7 +29,6 @@ def container_to_output_format(container_format: str | None) -> str | None:
 
     formats = container_format.split(",")
     return formats[0]
-
 
 def get_open_write_kwargs(
     dest: str | io.BytesIO, container_format: str, to_format: str | None
@@ -57,12 +57,17 @@ class VideoFromFile(VideoInput):
     Class representing video input from a file.
     """
 
-    def __init__(self, file: str | io.BytesIO):
+    def __init__(self, file: str | io.BytesIO, *, start_time: float=0, duration: float=0):
         """
         Initialize the VideoFromFile object based off of either a path on disk or a BytesIO object
         containing the file contents.
         """
         self.__file = file
+        self.__start_time = start_time
+        self.__duration = duration
+        if self.get_duration() <  duration:
+            raise ValueError(f"Can not initialize video of negative duration:\nSource duration: {self.get_duration()}\nStart time: {start_time}\nTarget duration: {duration}")
+        self.__duration = duration
 
     def get_stream_source(self) -> str | io.BytesIO:
         """
@@ -96,18 +101,20 @@ class VideoFromFile(VideoInput):
         Returns:
             Duration in seconds
         """
+        if self.__duration:
+            return self.__duration
         if isinstance(self.__file, io.BytesIO):
             self.__file.seek(0)
         with av.open(self.__file, mode="r") as container:
             if container.duration is not None:
-                return float(container.duration / av.time_base)
+                return float(container.duration / av.time_base) - self.__start_time
 
             # Fallback: calculate from frame count and frame rate
             video_stream = next(
                 (s for s in container.streams if s.type == "video"), None
             )
             if video_stream and video_stream.frames and video_stream.average_rate:
-                return float(video_stream.frames / video_stream.average_rate)
+                return float(video_stream.frames / video_stream.average_rate) - self.start_time
 
             # Last resort: decode frames to count them
             if video_stream and video_stream.average_rate:
@@ -117,7 +124,7 @@ class VideoFromFile(VideoInput):
                     for _ in packet.decode():
                         frame_count += 1
                 if frame_count > 0:
-                    return float(frame_count / video_stream.average_rate)
+                    return float(frame_count / video_stream.average_rate) - self.start_time
 
         raise ValueError(f"Could not determine duration for file '{self.__file}'")
 
@@ -132,12 +139,14 @@ class VideoFromFile(VideoInput):
         with av.open(self.__file, mode="r") as container:
             video_stream = self._get_first_video_stream(container)
             # 1. Prefer the frames field if available
-            if video_stream.frames and video_stream.frames > 0:
+            if video_stream.frames and video_stream.frames > 0 and not self.__start_time and not self.__duration:
                 return int(video_stream.frames)
 
+            if self.__duration:
+                return self.__duration / float(video_stream.average_rate)
             # 2. Try to estimate from duration and average_rate using only metadata
             if container.duration is not None and video_stream.average_rate:
-                duration_seconds = float(container.duration / av.time_base)
+                duration_seconds = float(container.duration / av.time_base) - self.__start_time
                 estimated_frames = int(round(duration_seconds * float(video_stream.average_rate)))
                 if estimated_frames > 0:
                     return estimated_frames
@@ -147,20 +156,23 @@ class VideoFromFile(VideoInput):
                 and getattr(video_stream, "time_base", None) is not None
                 and video_stream.average_rate
             ):
-                duration_seconds = float(video_stream.duration * video_stream.time_base)
+                duration_seconds = float(video_stream.duration * video_stream.time_base) - self.start_time
                 estimated_frames = int(round(duration_seconds * float(video_stream.average_rate)))
                 if estimated_frames > 0:
                     return estimated_frames
 
             # 3. Last resort: decode frames and count them (streaming)
-            frame_count = 0
-            container.seek(0)
-            for packet in container.demux(video_stream):
-                for _ in packet.decode():
-                    frame_count += 1
-
-            if frame_count == 0:
-                raise ValueError(f"Could not determine frame count for file '{self.__file}'")
+            frame_count = 1
+            start_pts = int(self.__start_time / video_stream.time_base)
+            container.seek(start_pts, stream=video_stream)
+            frame_iterator = container.decode(video_stream)
+            for frame in frame_iterator:
+                if frame.pts >= start_pts:
+                    break
+            else:
+                raise ValueError(f"Could not determine frame count for file '{self.__file}'\nNo frames exist for start_time {self.__start_time}")
+            for frame in frame_iterator:
+                frame_count += 1
             return frame_count
 
     def get_frame_rate(self) -> Fraction:
@@ -199,9 +211,17 @@ class VideoFromFile(VideoInput):
             return container.format.name
 
     def get_components_internal(self, container: InputContainer) -> VideoComponents:
+        video_stream = container.streams.video[0]
         # Get video frames
         frames = []
-        for frame in container.decode(video=0):
+        start_pts = int(self.__start_time / video_stream.time_base)
+        end_pts = int((self.__start_time + self.__duration) / video_stream.time_base)
+        container.seek(start_pts, stream=video_stream)
+        for frame in container.decode(video_stream):
+            if frame.pts < start_pts:
+                continue
+            if self.__duration and frame.pts >= end_pts:
+                break
             img = frame.to_ndarray(format='rgb24')  # shape: (H, W, 3)
             img = torch.from_numpy(img) / 255.0  # shape: (H, W, 3)
             frames.append(img)
@@ -209,31 +229,43 @@ class VideoFromFile(VideoInput):
         images = torch.stack(frames) if len(frames) > 0 else torch.zeros(0, 3, 0, 0)
 
         # Get frame rate
-        video_stream = next(s for s in container.streams if s.type == 'video')
-        frame_rate = Fraction(video_stream.average_rate) if video_stream and video_stream.average_rate else Fraction(1)
+        frame_rate = Fraction(video_stream.average_rate) if video_stream.average_rate else Fraction(1)
 
         # Get audio if available
         audio = None
-        try:
-            container.seek(0)  # Reset the container to the beginning
-            for stream in container.streams:
-                if stream.type != 'audio':
-                    continue
-                assert isinstance(stream, av.AudioStream)
-                audio_frames = []
-                for packet in container.demux(stream):
-                    for frame in packet.decode():
-                        assert isinstance(frame, av.AudioFrame)
-                        audio_frames.append(frame.to_ndarray())  # shape: (channels, samples)
-                if len(audio_frames) > 0:
-                    audio_data = np.concatenate(audio_frames, axis=1)  # shape: (channels, total_samples)
-                    audio_tensor = torch.from_numpy(audio_data).unsqueeze(0)  # shape: (1, channels, total_samples)
-                    audio = AudioInput({
-                        "waveform": audio_tensor,
-                        "sample_rate": int(stream.sample_rate) if stream.sample_rate else 1,
-                    })
-        except StopIteration:
-            pass  # No audio stream
+        container.seek(start_pts, stream=video_stream)
+        # Use last stream for consistency
+        audio_stream = container.streams.audio[-1]
+        if audio_stream:
+            audio_frames = []
+            resample = av.audio.resampler.AudioResampler(format='fltp').resample
+            frames = itertools.chain.from_iterable(
+                    map(resample, container.decode(audio_stream)))
+
+            has_first_frame = False
+            for frame in frames:
+                offset_seconds = self.__start_time - frame.pts * audio_stream.time_base
+                to_skip = int(offset_seconds * audio_stream.sample_rate)
+                if to_skip < frame.samples:
+                    has_first_frame = True
+                    break
+            if has_first_frame:
+                audio_frames.append(frame.to_ndarray()[...,to_skip:])
+
+            for frame in frames:
+                if frame.time > self.__start_time + self.__duration:
+                    break
+                audio_frames.append(frame.to_ndarray())  # shape: (channels, samples)
+            if len(audio_frames) > 0:
+                audio_data = np.concatenate(audio_frames, axis=1)  # shape: (channels, total_samples)
+                if self.__duration:
+                    audio_data = audio_data[..., :int(self.__duration * audio_stream.sample_rate)]
+
+                audio_tensor = torch.from_numpy(audio_data).unsqueeze(0)  # shape: (1, channels, total_samples)
+                audio = AudioInput({
+                    "waveform": audio_tensor,
+                    "sample_rate": int(audio_stream.sample_rate) if audio_stream.sample_rate else 1,
+                })
 
         metadata = container.metadata
         return VideoComponents(images=images, audio=audio, frame_rate=frame_rate, metadata=metadata)
@@ -261,6 +293,8 @@ class VideoFromFile(VideoInput):
             if format != VideoContainer.AUTO and format not in container_format.split(","):
                 reuse_streams = False
             if codec != VideoCodec.AUTO and codec != video_encoding and video_encoding is not None:
+                reuse_streams = False
+            if self.__start_time or self.__duration:
                 reuse_streams = False
 
             if not reuse_streams:
@@ -308,6 +342,11 @@ class VideoFromFile(VideoInput):
         if video_stream is None:
             raise ValueError(f"No video stream found in file '{self.__file}'")
         return video_stream
+
+    def as_trimmed(self, start_time: float=0, duration: float=0) -> VideoInput|None:
+        if self.get_duration() < start_time + duration:
+            return None
+        return VideoFromFile(self.get_stream_source(), start_time=start_time + self.__start_time, duration=duration + self.__duration)
 
 
 class VideoFromComponents(VideoInput):
@@ -381,3 +420,8 @@ class VideoFromComponents(VideoInput):
 
                 # Flush encoder
                 output.mux(audio_stream.encode(None))
+    def as_trimmed(self, start_time: float|None=None, duration: float|None=None) -> VideoInput|None:
+        if self.get_duration() < start_time + duration:
+            return None
+        #TODO Consider tracking duration and trimming at time of save?
+        return VideoFromFile(self.get_stream_source(), start_time=start_time, duration=duration)

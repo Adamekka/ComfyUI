@@ -202,6 +202,28 @@ class LoadVideo(io.ComfyNode):
 
         return True
 
+class VideoSlice(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="Video Slice",
+            display_name="Video Slice",
+            search_aliases=["trim video duration", "skip first frames", "frame load cap", "start time"],
+            category="image/video",
+            inputs=[
+                io.Video.Input('video'),
+                io.Float.Input('start_time', default=0.0, min=0.0, step=.001),
+                io.Float.Input('duration', default=0.0, min=0.0, step=.001),
+            ],
+            outputs=[
+                io.Video.Output(),
+            ],
+        )
+
+    @classmethod
+    def execute(cls, video, start_time, duration) -> io.NodeOutput:
+        return io.NodeOutput(video.as_trimmed(start_time, duration))
+
 
 class VideoExtension(ComfyExtension):
     @override
@@ -212,6 +234,7 @@ class VideoExtension(ComfyExtension):
             CreateVideo,
             GetVideoComponents,
             LoadVideo,
+            VideoSlice,
         ]
 
 async def comfy_entrypoint() -> VideoExtension:
