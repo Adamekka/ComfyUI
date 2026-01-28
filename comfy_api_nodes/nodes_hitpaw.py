@@ -26,7 +26,6 @@ from comfy_api_nodes.util import (
 )
 
 VIDEO_MODELS_MODELS_MAP = {
-    "Face Soft Model (2x)": "face_soft_2x",
     "Portrait Restore Model (1x)": "portrait_restore_1x",
     "Portrait Restore Model (2x)": "portrait_restore_2x",
     "General Restore Model (1x)": "general_restore_1x",
